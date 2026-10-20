@@ -44,6 +44,31 @@ class JournalEvent:
 _JOURNAL_ROW = re.compile(r"^\s*(\d+)  (.{19})  (\S+)(.*)$")
 
 
+@dataclass(frozen=True)
+class BackendUris:
+    """Sortie de `backend show` (cli_cmd_admin.c) : URIs effectives et leur
+    origine — NVS override ou factory default (CONFIG_*_URI du profil)."""
+    broker: str
+    broker_overridden: bool
+    websocket: str
+    websocket_overridden: bool
+
+
+_BACKEND_ROW = re.compile(r"^(broker|websocket)\s*:\s*(\S+)\s+\((NVS override|factory default)\)\s*$")
+
+
+def parse_backend_show(lines) -> BackendUris:
+    found: dict[str, tuple[str, bool]] = {}
+    for line in lines:
+        m = _BACKEND_ROW.match(line)
+        if m:
+            found[m.group(1)] = (m.group(2), m.group(3) == "NVS override")
+    try:
+        return BackendUris(*found["broker"], *found["websocket"])
+    except KeyError as exc:
+        raise AssertionError(f"`backend show` illisible : {list(lines)!r}") from exc
+
+
 def parse_journal_rows(lines) -> list[JournalEvent]:
     events = []
     for line in lines:
@@ -257,6 +282,13 @@ class Dut:
         if not resp.ok:
             raise AssertionError(f"journal list : CR 0x{resp.status:X}")
         return parse_journal_rows(resp.data)
+
+    def backend_show(self) -> BackendUris:
+        """URIs backend effectives (produits MQTT ; sans mode admin)."""
+        resp = self.cli("backend", "show")
+        if not resp.ok:
+            raise AssertionError(f"backend show : CR 0x{resp.status:X}")
+        return parse_backend_show(resp.data)
 
     def forget_cli(self) -> None:
         """À appeler quand la prise redémarre par un autre chemin que reset()

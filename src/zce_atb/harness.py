@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import queue
 import threading
 import time
@@ -36,6 +37,24 @@ class HarnessTimeout(AssertionError):
     """L'observateur n'a pas vu le message attendu dans le délai imparti."""
 
 
+class _CommandServer(CommandServer):
+    """broadcast tolérant : une prise qui a redémarré laisse derrière elle
+    un websocket mort dans la liste des clients (pas de FIN au reboot) ;
+    la diffusion d'em_mqtt lèverait au premier envoi raté, avant d'atteindre
+    la connexion vivante. Ici on écarte les morts et on compte les délivrés."""
+
+    async def broadcast(self, command: dict) -> int:
+        payload = json.dumps(command)
+        delivered = 0
+        for client in list(self._clients):
+            try:
+                await client.send(payload)
+                delivered += 1
+            except Exception:  # noqa: BLE001 — connexion fermée côté prise
+                self._clients.discard(client)
+        return delivered
+
+
 class _TaggingDecoder(FrameDecoder):
     """FrameDecoder qui étiquette chaque dict décodé avec le `kind` du topic
     (telemetry / status / availability / errors). Les dicts d'em_mqtt ne
@@ -53,8 +72,15 @@ class BenchHarness:
     """Backend MQTT de test, démarré/arrêté par la fixture de session."""
 
     def __init__(self, serial: str, lan_ip: str | None = None,
-                 services: tuple[str, ...] = ("broker", "observer", "commands")) -> None:
-        self.settings: Settings = load_settings(serial=serial, lan_ip=lan_ip)
+                 services: tuple[str, ...] = ("broker", "observer", "commands"),
+                 port_offset: int = 0) -> None:
+        """``port_offset`` décale tous les ports d'écoute (seconde instance,
+        « backend B » du plan backend_uri : 1883→1893, 8080→8090, 8765→8775
+        pour +10) ; em_mqtt interdit les décalages qui retombent sur un port
+        de l'instance par défaut."""
+        self.settings: Settings = load_settings(serial=serial, lan_ip=lan_ip,
+                                                port_offset=port_offset)
+        self.port_offset = port_offset
         self._service_names = services
         self._queues: dict[str, queue.Queue] = {}
         self._queues_lock = threading.Lock()
@@ -67,7 +93,7 @@ class BenchHarness:
 
     def start(self, timeout_s: float = 15.0) -> None:
         if "broker" in self._service_names:
-            assert_broker_ports_free((self.settings.mqtt_port,))
+            assert_broker_ports_free((self.settings.mqtt_port, self.settings.mqtt_ws_port))
 
         services = []
         if "broker" in self._service_names:          # le broker avant ses clients
@@ -83,7 +109,7 @@ class BenchHarness:
             # close_timeout=2 : le firmware ne renvoie pas non plus de trame
             # CLOSE ; sans cette borne, stop() attend 10 s par prise connectée.
             serve = functools.partial(websockets.serve, ping_interval=None, close_timeout=2)
-            self._commands = CommandServer(self.settings, CommandResponder(), serve=serve)
+            self._commands = _CommandServer(self.settings, CommandResponder(), serve=serve)
             services.append(self._commands)
         self._runner = ServiceRunner(services)
 
@@ -101,10 +127,27 @@ class BenchHarness:
                 self._run(self._runner.stop(), timeout_s)
             except Exception:
                 pass
+            # amqtt laisse des coroutines en attente après shutdown : les
+            # annuler avant d'arrêter la boucle évite une pluie de « Task was
+            # destroyed but it is pending » / « Event loop is closed ».
+            try:
+                self._run(self._cancel_pending_tasks(), 5.0)
+            except Exception:
+                pass
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:
             self._thread.join(timeout=timeout_s)
+        if self._loop is not None and not self._loop.is_running():
+            self._loop.close()
+
+    @staticmethod
+    async def _cancel_pending_tasks() -> None:
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def _run(self, coro, timeout_s: float):
         """Exécute une coroutine dans la boucle du harnais, depuis un test."""

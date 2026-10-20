@@ -34,7 +34,8 @@ Le banc est une **intégration de briques internes existantes** :
 cd C:\workspace\zce_atb
 poetry install
 Copy-Item config\station.example.yaml config\station.yaml   # puis adapter
-poetry run pytest -m tronc_commun
+poetry run pytest -m tronc_commun                 # à chaque passe
+poetry run pytest -m "tronc_commun or backend"    # + extension §8 (seconde instance em_mqtt, ports +10)
 ```
 
 La configuration du poste peut aussi être pointée par `ZCE_ATB_CONFIG`.
@@ -56,6 +57,8 @@ tests/
     test_boot.py         # §2 boot et intégrité de base
     test_connectivity.py # §3 identité, broker, serveur de commandes, CNX-10
     test_errors.py       # §5 chaîne d'erreurs : MEDIUM, HIGH latché, déblocage par reset
+  extensions/
+    test_backend.py      # §8 set_backend : migration A→B et retour, rejet tout-ou-rien
 ```
 
 ## Principes
@@ -95,11 +98,18 @@ Mécanique ajoutée : `dut.cli_admin()` (armement
 lignes de `journal list`), `dut.forget_cli()` après un reboot commandé par
 websocket, et le module `oracles.py`.
 
+§8 `set_backend` **validé sur cible le 2026-10-20** (`extensions/test_backend.py`,
+marqueur `backend` : migration A→B par une seconde instance em_mqtt décalée
+de +10 ports, retour par `backend reset`, rejet tout-ou-rien ; 2 verts en
+~1 min 20). À savoir : `backend show` ne rapporte que l'état **effectif**
+résolu au boot, jamais un override persisté non appliqué — la fixture
+`backend_defaults` fait donc toujours `backend reset` (idempotent) avant et
+après chaque test, pour ne jamais laisser la prise pointer sur B.
+
 À venir, dans l'ordre de la roadmap SPEC-1.1 §5 :
 
-1. fin de phase 1 : §8 `set_backend` ; arrêt **brutal** du serveur de
-   commandes (second chemin CNX-10) ; ré-énumération USB Serial/JTAG
-   (produit EM) ;
+1. fin de phase 1 : arrêt **brutal** du serveur de commandes (second
+   chemin CNX-10) ; ré-énumération USB Serial/JTAG (produit EM) ;
 2. phase 2 : drivers ASR-2100 / NPA701 validés sur instruments (manuels
    dans le dépôt de la spec, `doc/`), charge commutée, §4 télémétrie avec
    oracle métrologique, §6 coupure secteur ;

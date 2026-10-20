@@ -7,7 +7,20 @@ journal) pour que les tests s'écrivent en termes métier — « relais fermé �
 
 from __future__ import annotations
 
+import re
+
 from .dut import JournalEvent
+
+_URI_PORT = re.compile(r"^(\w+://[^/:]+):(\d+)(.*)$")
+
+
+def shift_uri_port(uri: str, offset: int) -> str:
+    """`ws://192.168.1.39:8080` + 10 → `ws://192.168.1.39:8090` : l'URI de la
+    même ressource sur une instance em_mqtt décalée de `offset` ports."""
+    m = _URI_PORT.match(uri)
+    if m is None:
+        raise ValueError(f"URI sans port explicite : {uri!r}")
+    return f"{m.group(1)}:{int(m.group(2)) + offset}{m.group(3)}"
 
 # Flags de la trame télémétrie (spec ZCE_Wattel_EM_Protocol, octets 3-4) :
 # bit 0 = état relais connu, bit 1 = relais fermé, bits 2-3 = commande persistée.

@@ -16,6 +16,8 @@ de sleep fixe.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as _dt
 import re
 import threading
@@ -96,6 +98,16 @@ class DutLogTimeout(AssertionError):
 
 class DutCliUnavailable(AssertionError):
     """La CLI BLE n'a pas pu être (re)connectée dans le délai imparti."""
+
+
+# Reconnexion BLE : la pile WinRT bloque sur une connexion vers une adresse
+# qui n'est pas (encore) annoncée, et une tentative expirée laisse un état en
+# suspens qui fait expirer les suivantes. D'où : scan de l'annonce d'abord,
+# connexion seulement si la prise est vue, client en échec déconnecté.
+_BLE_SCAN_TIMEOUT_S = 8.0
+_BLE_CONNECT_TIMEOUT_S = 10.0
+_BLE_RETRY_PAUSE_S = 2.0
+_BLE_RECONNECT_WINDOW_S = 90.0
 
 
 class Dut:
@@ -225,7 +237,31 @@ class Dut:
         self._ble_address = found[0].address
         return self._ble_address
 
-    def _ensure_cli(self, timeout_s: float = 30.0):
+    def _open_ble_session(self, address: str):
+        """Une tentative : scan de l'annonce, puis connexion sur le BLEDevice
+        vu (et non sur l'adresse nue). En échec, le client est déconnecté
+        pour ne pas laisser WinRT avec une connexion en suspens."""
+        from bleak import BleakClient, BleakScanner
+
+        device = asyncio.run(BleakScanner.find_device_by_address(address, timeout=_BLE_SCAN_TIMEOUT_S))
+        if device is None:
+            raise DutCliUnavailable(f"aucune annonce BLE de {address} en {_BLE_SCAN_TIMEOUT_S:g} s")
+        created: list = []
+
+        def factory(_address: str):
+            client = BleakClient(device, timeout=_BLE_CONNECT_TIMEOUT_S)
+            created.append(client)
+            return client
+
+        try:
+            return BleLink(address, client_factory=factory).open(self._cfg.serial)
+        except Exception:
+            for client in created:
+                with contextlib.suppress(Exception):
+                    asyncio.run(client.disconnect())
+            raise
+
+    def _ensure_cli(self, timeout_s: float = _BLE_RECONNECT_WINDOW_S):
         """Session BLE vivante, (re)connectée si besoin — la prise redémarre
         souvent entre deux commandes (reset, OTA, coupure secteur)."""
         if self._ble_session is not None and self._ble_session.alive:
@@ -233,17 +269,18 @@ class Dut:
         self._close_ble()
         address = self._resolve_ble_address()
         deadline = time.monotonic() + timeout_s
-        last_error: Exception | None = None
+        attempts: list[str] = []
         while time.monotonic() < deadline:
             try:
-                self._ble_session = BleLink(address).open(self._cfg.serial)
+                self._ble_session = self._open_ble_session(address)
                 self._admin_armed = False    # nouvelle session = firmware peut avoir rebooté
                 return self._ble_session
-            except Exception as exc:       # device en cours de boot, pub BLE absente…
-                last_error = exc
-                time.sleep(1.0)
+            except Exception as exc:       # device en cours de boot, annonce absente, WinRT…
+                attempts.append(f"{type(exc).__name__}: {exc}".rstrip(": "))
+                time.sleep(_BLE_RETRY_PAUSE_S)
         raise DutCliUnavailable(
-            f"CLI BLE injoignable ({address}) après {timeout_s:g} s : {last_error}")
+            f"CLI BLE injoignable ({address}) après {timeout_s:g} s, "
+            f"{len(attempts)} tentative(s) : {attempts[-3:]}")
 
     def _close_ble(self) -> None:
         if self._ble_session is not None:
@@ -257,12 +294,14 @@ class Dut:
         session.poll()                      # purge le bruit d'avant la commande
         return CliExecutor(session, profile=self._cfg.cli_profile).execute(name, *args)
 
-    def cli(self, name: str, *args: str, connect_timeout_s: float = 30.0) -> CliResponse:
+    def cli(self, name: str, *args: str,
+            connect_timeout_s: float = _BLE_RECONNECT_WINDOW_S) -> CliResponse:
         """Une commande CLI validée par le catalogue, réponse assemblée
         (CliTimeoutError au-delà du budget du catalogue)."""
         return self._exec(self._ensure_cli(connect_timeout_s), name, *args)
 
-    def cli_admin(self, name: str, *args: str, connect_timeout_s: float = 30.0) -> CliResponse:
+    def cli_admin(self, name: str, *args: str,
+                  connect_timeout_s: float = _BLE_RECONNECT_WINDOW_S) -> CliResponse:
         """Commande de test/maintenance (err_raise, wifi_disco, journal clear…) :
         arme le mode admin du firmware si besoin (`help admin_mode <code>`,
         cli.c — seul le nombre d'arguments est vérifié ; l'état retombe au
@@ -296,7 +335,7 @@ class Dut:
         morte, on la rouvrira au prochain cli()."""
         self._close_ble()
 
-    def reset(self, connect_timeout_s: float = 30.0) -> None:
+    def reset(self, connect_timeout_s: float = _BLE_RECONNECT_WINDOW_S) -> None:
         """Reset logiciel sans attendre de statut : la cible redémarre avant
         d'avoir répondu. L'écriture GATT peut lever (WinError -2147023673
         « opération annulée ») parce que la prise coupe le lien BLE pendant le

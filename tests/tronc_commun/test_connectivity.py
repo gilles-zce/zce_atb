@@ -45,20 +45,14 @@ def test_connexion_serveur_de_commandes(dut, station, harness, fresh_boot):
     assert harness.ws_client_count >= 1
 
 
-def test_reprise_apres_redemarrage_du_serveur(dut, station, harness):
-    """CNX-10 : après redémarrage du serveur de commandes, la prise se
-    reconnecte seule et reste pilotable.
-
-    Le chemin intermédiaire côté firmware dépend du timing de fermeture
-    (`websocket_manager.c`) : trame CLOSE traitée → WEBSOCKET_EVENT_CLOSED
-    (« closed by the server »), ou chute TCP avant traitement →
-    WEBSOCKET_EVENT_DISCONNECTED. Les deux déclenchent la reprise ; on ancre
-    donc l'oracle sur la reconnexion effective, pas sur l'événement transitoire.
-    """
+def _assert_reprise_apres_redemarrage(dut, station, harness, *, brutal: bool) -> int:
+    """Redémarre le serveur de commandes et vérifie que la prise se
+    reconnecte seule et reste pilotable. Rend le repère console pris avant
+    le redémarrage, pour que l'appelant qualifie le chemin emprunté."""
     harness.wait_for_ws_client(timeout=station.timeouts.broker_connect_s)
     mark = dut.mark()
 
-    harness.restart_command_server()
+    harness.restart_command_server(brutal=brutal)
 
     # La prise était déjà connectée avant le repère : un nouveau
     # « Websocket connected » après ``mark`` prouve qu'elle a perdu puis
@@ -69,3 +63,31 @@ def test_reprise_apres_redemarrage_du_serveur(dut, station, harness):
     # À nouveau pilotable : une commande est délivrée à au moins une prise.
     assert harness.send_command({"cmd": "relay", "value": 0},
                                 timeout=station.timeouts.command_ack_s) >= 1
+    return mark
+
+
+def test_reprise_apres_redemarrage_du_serveur(dut, station, harness):
+    """CNX-10, chemin « fermeture propre » : le serveur envoie ses trames
+    CLOSE puis ferme ; la prise se reconnecte seule et reste pilotable.
+
+    L'événement intermédiaire côté firmware dépend du timing
+    (`websocket_manager.c`) : trame CLOSE traitée → WEBSOCKET_EVENT_CLOSED
+    (« closed by the server »), ou chute TCP avant traitement →
+    WEBSOCKET_EVENT_DISCONNECTED. Les deux déclenchent la reprise ; l'oracle
+    est la reconnexion effective, pas l'événement transitoire.
+    """
+    _assert_reprise_apres_redemarrage(dut, station, harness, brutal=False)
+
+
+def test_reprise_apres_arret_brutal_du_serveur(dut, station, harness):
+    """CNX-10, chemin « arrêt brutal » : sockets abandonnés sans handshake
+    (processus serveur tué). Aucune trame CLOSE n'a été envoyée, la prise ne
+    peut donc passer que par WEBSOCKET_EVENT_DISCONNECTED (ou ERROR), jamais
+    par CLOSED — et doit reprendre quand même."""
+    mark = _assert_reprise_apres_redemarrage(dut, station, harness, brutal=True)
+
+    lines = dut.log_since(mark)
+    assert not any("Websocket closed by the server" in l for l in lines), \
+        "chemin CLOSED observé alors qu'aucune trame CLOSE n'a été envoyée"
+    assert any("Websocket disconnected" in l or "Websocket error" in l for l in lines), \
+        "ni DISCONNECTED ni ERROR loggé avant la reconnexion"

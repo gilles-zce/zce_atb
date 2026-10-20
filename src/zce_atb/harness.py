@@ -54,6 +54,21 @@ class _CommandServer(CommandServer):
                 self._clients.discard(client)
         return delivered
 
+    async def kill(self) -> None:
+        """Arrêt brutal : sockets des prises coupés sans handshake websocket
+        (RST, aucune trame CLOSE) puis listeners fermés — ce que voit une
+        prise quand le processus serveur est tué. Chemin DISCONNECTED du
+        firmware, par opposition au chemin CLOSED de stop()."""
+        for client in list(self._clients):
+            transport = getattr(client, "transport", None)
+            if transport is not None:
+                transport.abort()
+        self._clients.clear()
+        servers, self._servers = self._servers, []
+        for server in servers:
+            server.close(close_connections=False)
+            await server.wait_closed()
+
 
 class _TaggingDecoder(FrameDecoder):
     """FrameDecoder qui étiquette chaque dict décodé avec le `kind` du topic
@@ -215,9 +230,14 @@ class BenchHarness:
             raise HarnessTimeout("commande non délivrée : aucune prise connectée")
         return count
 
-    def restart_command_server(self, timeout_s: float = 30.0) -> None:
-        """Arrêt propre (trames CLOSE) puis redémarrage du serveur de
-        commandes — scénario CNX-10, chemin « fermeture propre ».
-        TODO : variante brutale (socket tué sans CLOSE) pour le second chemin."""
-        self._run(self._commands.stop(), timeout_s)
+    def restart_command_server(self, timeout_s: float = 30.0, *, brutal: bool = False) -> None:
+        """Redémarrage du serveur de commandes — scénario CNX-10. Propre :
+        trames CLOSE puis fermeture (chemin CLOSED ou DISCONNECTED selon que
+        la prise traite le CLOSE avant la coupure TCP). Brutal : sockets
+        abandonnés sans handshake, comme un processus tué (chemin
+        DISCONNECTED garanti, aucun CLOSE n'ayant été envoyé)."""
+        if brutal:
+            self._run(self._commands.kill(), timeout_s)
+        else:
+            self._run(self._commands.stop(), timeout_s)
         self._run(self._commands.start(), timeout_s)

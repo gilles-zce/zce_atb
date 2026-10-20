@@ -20,6 +20,7 @@ import datetime as _dt
 import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from production_bench.application.cli_executor import CliExecutor
@@ -28,6 +29,33 @@ from production_bench.infrastructure.ble_link import BleLink, scan_ble_devices
 from production_bench.infrastructure.uart_link import UartLink
 
 from .config import DutConfig
+
+
+@dataclass(frozen=True)
+class JournalEvent:
+    """Une ligne de `journal list` (cli_cmd_admin.c, journal_dump_record)."""
+    index: int
+    when: str            # "YYYY-MM-DD HH:MM:SS" (UTC) ou "not-synced"
+    event: str           # BOOT, ERROR, RELAY_ON, RELAY_OFF, OTA_SUCCESS…
+    payload: bytes
+
+
+# Format firmware : "%4lu  %-19s  %-17s%s" puis " %02X" par octet de payload.
+_JOURNAL_ROW = re.compile(r"^\s*(\d+)  (.{19})  (\S+)(.*)$")
+
+
+def parse_journal_rows(lines) -> list[JournalEvent]:
+    events = []
+    for line in lines:
+        m = _JOURNAL_ROW.match(line)
+        if m is None:
+            continue                         # en-tête ou bruit
+        try:
+            payload = bytes.fromhex(m.group(4).replace(" ", ""))
+        except ValueError:
+            continue
+        events.append(JournalEvent(int(m.group(1)), m.group(2).strip(), m.group(3), payload))
+    return events
 
 
 class DutLogTimeout(AssertionError):
@@ -61,6 +89,7 @@ class Dut:
         # CLI BLE (ouverte paresseusement, rouverte après chaque reboot)
         self._ble_session = None
         self._ble_address: str | None = config.ble_address
+        self._admin_armed = False        # `help admin_mode` retombe à chaque boot
 
     # -- cycle de vie --------------------------------------------------------
 
@@ -183,6 +212,7 @@ class Dut:
         while time.monotonic() < deadline:
             try:
                 self._ble_session = BleLink(address).open(self._cfg.serial)
+                self._admin_armed = False    # nouvelle session = firmware peut avoir rebooté
                 return self._ble_session
             except Exception as exc:       # device en cours de boot, pub BLE absente…
                 last_error = exc
@@ -198,13 +228,41 @@ class Dut:
                 pass
             self._ble_session = None
 
+    def _exec(self, session, name: str, *args: str) -> CliResponse:
+        session.poll()                      # purge le bruit d'avant la commande
+        return CliExecutor(session, profile=self._cfg.cli_profile).execute(name, *args)
+
     def cli(self, name: str, *args: str, connect_timeout_s: float = 30.0) -> CliResponse:
         """Une commande CLI validée par le catalogue, réponse assemblée
         (CliTimeoutError au-delà du budget du catalogue)."""
+        return self._exec(self._ensure_cli(connect_timeout_s), name, *args)
+
+    def cli_admin(self, name: str, *args: str, connect_timeout_s: float = 30.0) -> CliResponse:
+        """Commande de test/maintenance (err_raise, wifi_disco, journal clear…) :
+        arme le mode admin du firmware si besoin (`help admin_mode <code>`,
+        cli.c — seul le nombre d'arguments est vérifié ; l'état retombe au
+        boot, d'où le réarmement à chaque nouvelle session BLE)."""
         session = self._ensure_cli(connect_timeout_s)
-        session.poll()                      # purge le bruit d'avant la commande
-        executor = CliExecutor(session, profile=self._cfg.cli_profile)
-        return executor.execute(name, *args)
+        if not self._admin_armed:
+            armed = self._exec(session, "help", "admin_mode", "1")
+            if not armed.ok:
+                raise DutCliUnavailable(f"armement du mode admin refusé : CR 0x{armed.status:X}")
+            self._admin_armed = True
+        return self._exec(session, name, *args)
+
+    def journal_list(self, last_n: int = 20) -> list[JournalEvent]:
+        """Les `last_n` derniers événements du journal flash, du plus ancien
+        au plus récent."""
+        resp = self.cli("journal", "list", str(last_n))
+        if not resp.ok:
+            raise AssertionError(f"journal list : CR 0x{resp.status:X}")
+        return parse_journal_rows(resp.data)
+
+    def forget_cli(self) -> None:
+        """À appeler quand la prise redémarre par un autre chemin que reset()
+        (commande websocket reset, OTA, coupure secteur) : la session BLE est
+        morte, on la rouvrira au prochain cli()."""
+        self._close_ble()
 
     def reset(self, connect_timeout_s: float = 30.0) -> None:
         """Reset logiciel sans attendre de statut : la cible redémarre avant

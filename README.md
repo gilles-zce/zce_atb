@@ -51,9 +51,11 @@ src/zce_atb/
   drivers/       # ASR-2100, NPA701 (squelettes SCPI, phase 2)
 tests/
   conftest.py            # fixtures station / dut / harness / fresh_boot
+  oracles.py     # flags relais de la télémétrie, codes du topic errors, journal
   tronc_commun/
     test_boot.py         # §2 boot et intégrité de base
     test_connectivity.py # §3 identité, broker, serveur de commandes, CNX-10
+    test_errors.py       # §5 chaîne d'erreurs : MEDIUM, HIGH latché, déblocage par reset
 ```
 
 ## Principes
@@ -84,11 +86,20 @@ Enseignements de la mise au point, à connaître avant d'étendre :
   et `close_timeout=2`, et CNX-10 observe la reconnexion effective plutôt
   que l'événement transitoire (CLOSED ou DISCONNECTED selon le timing).
 
+§5 chaîne d'erreurs **validé sur cible le 2026-10-20** (`test_errors.py` :
+MEDIUM non latché, HIGH latché avec coupure et refus de `relay on`,
+déblocage par `{"cmd":"reset"}` avec BOOT 03 et `errors` purgé ; §5.4 Wi-Fi
+sauté jusqu'à l'AP pilotable) — 11 verts + 1 sauté en ~3 min 30.
+Mécanique ajoutée : `dut.cli_admin()` (armement
+`help admin_mode`, retombe à chaque boot), `dut.journal_list()` (parseur des
+lignes de `journal list`), `dut.forget_cli()` après un reboot commandé par
+websocket, et le module `oracles.py`.
+
 À venir, dans l'ordre de la roadmap SPEC-1.1 §5 :
 
-1. fin de phase 1 : §5 chaîne d'erreurs (`err_raise` + topic `errors`),
-   §8 `set_backend` ; arrêt **brutal** du serveur de commandes (second
-   chemin CNX-10) ; ré-énumération USB Serial/JTAG (produit EM) ;
+1. fin de phase 1 : §8 `set_backend` ; arrêt **brutal** du serveur de
+   commandes (second chemin CNX-10) ; ré-énumération USB Serial/JTAG
+   (produit EM) ;
 2. phase 2 : drivers ASR-2100 / NPA701 validés sur instruments (manuels
    dans le dépôt de la spec, `doc/`), charge commutée, §4 télémétrie avec
    oracle métrologique, §6 coupure secteur ;

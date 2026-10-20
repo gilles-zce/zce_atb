@@ -22,11 +22,13 @@ def test_boot_propre_et_journal_monte(dut, station, fresh_boot):
 
 
 def test_cause_de_reset_correcte(dut, station, fresh_boot):
-    """Après un reset logiciel, l'événement BOOT porte la cause 03 (SW).
-    TODO : lire l'événement via la CLI (`journal list`) plutôt que le log —
-    à brancher quand la commande sera confirmée dans le catalogue."""
-    # Le firmware journalise la cause au boot ; motif à affiner sur cible.
-    dut.wait_for_log(r"BOOT", since=fresh_boot, timeout=5)
+    """Après un reset logiciel, le dernier événement BOOT du journal porte la
+    cause 03 (reset logiciel ; 01 = POWERON après coupure secteur)."""
+    from zce_atb.oracles import last_event
+
+    boot = last_event(dut.journal_list(5), "BOOT")
+    assert boot is not None, "aucun événement BOOT dans les 5 derniers du journal"
+    assert boot.payload[:1] == b"\x03", f"cause de reset inattendue : {boot.payload.hex(' ')}"
 
 
 def test_version_conforme(dut, station):

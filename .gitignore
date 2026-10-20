@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+log/
+# Configuration locale du poste (station.example.yaml reste versionné)
+config/station.yaml

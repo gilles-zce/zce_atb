@@ -1,0 +1,38 @@
+# Configuration de poste zce_atb — copier vers station.yaml (non versionné)
+# et adapter au banc. Chemin alternatif : variable ZCE_ATB_CONFIG.
+
+product: zce            # zce | wattel_em | ocpp
+
+# IP LAN annoncée aux prises ; null = détection automatique (em_mqtt).
+# La renseigner si le poste a plusieurs interfaces.
+lan_ip: null
+
+dut:
+  serial: ZCE-GE-f96dc3ee76ab4291a3   # sérial provisionné (code modèle en MAJUSCULES, D9)
+  log_port: COM19                     # console de LOGS, lecture seule (USB Serial/JTAG)
+  ble_address: null                   # MAC du service CLI BLE (zce-cli) ; null = scan,
+                                      # accepté seulement si une seule prise est à portée
+  ble_name: zce-cli
+  baudrate: 115200
+  cli_profile: internal
+  expected_version: null              # ex. "1.14.0" ; null = non vérifié
+
+harness:
+  services: [broker, observer, commands]
+
+timeouts:
+  boot_s: 40
+  broker_connect_s: 90        # Wi-Fi + SNTP + MQTT
+  ws_reconnect_s: 20          # ~10 s nominal après retour du serveur de commandes
+  command_ack_s: 5
+
+# Phase 2 — adresses VISA ; null = instrument absent, tests `instruments` sautés.
+instruments:
+  asr2100: null               # ex. TCPIP0::192.168.1.50::inst0::INSTR
+  npa701: null                # ex. USB0::0x0AAD::0x...::INSTR
+
+# Écarts admis télémétrie DUT vs référence NPA701 (phase 2).
+tolerances:
+  voltage_v: 2.0
+  current_a: 0.5
+  power_w: 5.0

@@ -1,0 +1,43 @@
+[tool.poetry]
+name = "zce-atb"
+version = "0.1.0"
+description = "WATTEL'GO / WATTEL'WALL Automatic Test Bench (WATTELGO-ATB-SPEC-1.1) : automatisation du plan de smoke test fonctionnel"
+authors = ["Gilles Durant <gilles.durant@zce-group.com>"]
+readme = "README.md"
+packages = [{ include = "zce_atb", from = "src" }]
+
+[tool.poetry.dependencies]
+# Intersection des exigences de production-bench (<3.15) et em-mqtt (<3.14).
+python = ">=3.13,<3.14"
+pyyaml = "^6.0"
+# Instruments (phase 2) : pyvisa-py évite toute dépendance à un VISA éditeur.
+pyvisa = "^1.14"
+pyvisa-py = "^0.7"
+# Briques internes réutilisées telles quelles (décision WATTELGO-ATB-SPEC-1.1 §1.2.2).
+production-bench = { path = "../production_bench", develop = true }
+em-mqtt = { path = "../test_env/em_mqtt", develop = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+pytest-cov = "^6.0"
+ruff = "^0.9"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Par défaut on ne lance rien d'implicite : chaque session cible un marqueur.
+addopts = "-ra"
+markers = [
+    "tronc_commun: plan de smoke test §2–§6, déroulé à chaque passe",
+    "ota: extension OTA (§7), nécessite la gateway mTLS :9444",
+    "backend: extension backend/set_backend (§8)",
+    "metrology: extension métrologie (§9), build CONFIG_SIMULATE_STPM32 ou banc de charge",
+    "instruments: nécessite ASR-2100 / NPA701 raccordés (phase 2)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"

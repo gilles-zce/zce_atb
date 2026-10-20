@@ -106,10 +106,25 @@ résolu au boot, jamais un override persisté non appliqué — la fixture
 `backend_defaults` fait donc toujours `backend reset` (idempotent) avant et
 après chaque test, pour ne jamais laisser la prise pointer sur B.
 
+CNX-10 chemin **brutal** validé sur cible le 2026-10-20
+(`restart_command_server(brutal=True)` : sockets abandonnés par
+`transport.abort()`, listeners fermés sans `close_connections`, comme un
+processus tué ; le test exige le chemin DISCONNECTED/ERROR et exclut CLOSED).
+
+Reconnexion BLE durcie le même jour (flakiness WinRT après reboot : scan de
+l'annonce avant connexion, `timeout=10` inférieur au garde-fou de
+production_bench, client en échec déconnecté, fenêtre 90 s).
+
+**Trouvaille firmware remontée par le banc** (2026-10-20, Wattel EM, 1 passe
+sur 3) : sur défaut HIGH latché, la coupure du relais n'a pas été appliquée
+par le MCU Tuya (DP16 resté à 1 pendant > 15 s) alors que `RELAY_OFF` était
+journalisé — `tuya_link_set_relay` émet la trame 0x06 sans acquittement ni
+réémission. `test_defaut_high_latche_coupe_la_charge` échoue alors avec un
+message explicite ; ce n'est pas une flakiness du banc.
+
 À venir, dans l'ordre de la roadmap SPEC-1.1 §5 :
 
-1. fin de phase 1 : arrêt **brutal** du serveur de commandes (second
-   chemin CNX-10) ; ré-énumération USB Serial/JTAG (produit EM) ;
+1. fin de phase 1 : ré-énumération USB Serial/JTAG (produit EM) ;
 2. phase 2 : drivers ASR-2100 / NPA701 validés sur instruments (manuels
    dans le dépôt de la spec, `doc/`), charge commutée, §4 télémétrie avec
    oracle métrologique, §6 coupure secteur ;

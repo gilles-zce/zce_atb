@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from zce_atb.harness import HarnessTimeout
 from zce_atb.oracles import (
     error_codes,
     has_error,
@@ -90,7 +91,18 @@ def test_defaut_high_latche_coupe_la_charge(dut, station, harness, fresh_boot):
     msg = harness.wait_for("errors", predicate=has_error("ERROR_METRO_OVER_CURRENT", "HIGH"),
                            timeout=10)
     assert "ERROR_METRO_OVER_CURRENT" in error_codes(msg)
-    harness.wait_for("telemetry", predicate=relay_open, timeout=15)
+    try:
+        harness.wait_for("telemetry", predicate=relay_open, timeout=15)
+    except HarnessTimeout:
+        # Vu le 2026-10-20 sur Wattel EM (1 passe sur 3) : la commande
+        # d'ouverture (trame Tuya 0x06, sans acquittement ni réémission dans
+        # tuya_link) n'a pas été appliquée par le MCU, DP16 est resté à 1 alors
+        # que RELAY_OFF était déjà journalisé. L'oracle est juste : on nomme
+        # le cas plutôt que d'élargir la fenêtre.
+        last = harness.wait_for("telemetry", timeout=5)
+        pytest.fail("relais toujours fermé en télémétrie 15 s après la coupure sur défaut "
+                    f"(flags={last['flags']}) : commande relais non appliquée par la "
+                    "métrologie (Tuya : DP16 inchangé, cf. console « DP 16 … val0=1 »)")
 
     events = dut.journal_list(10)
     err = last_event(events, "ERROR")
